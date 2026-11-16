@@ -9,6 +9,7 @@ import { HEROES, HERO_BY_ID, HeroPreview } from './heroes.js';
 import { ITEMS, RUNES, BADGES, DIFF, expToNext, skillLevel } from './combat.js';
 import { MAP_3D, TERRAIN_CANVAS, BASE_INFO } from './map.js';
 import { sfx, setMuted, isMuted } from './audio.js';
+import { NET, onNet, netConnect, defaultNetUrl, createRoom, joinRoom, quickMatch, leaveRoom, setReady, setHero, setName, startGame, sendChat } from './net.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -34,7 +35,7 @@ export const UI = {
         <div class="currency"><span>🪙 <b id="lb-coins"></b></span><span id="lb-record"></span></div>
       </div>
       <div class="lobby-menu">
-        <button data-menu="hero">🦸 Tướng</button><button data-menu="items">🎒 Trang bị</button><button data-menu="shop">🛒 Shop</button><button data-menu="event">🎁 Sự kiện</button><button data-menu="guild">🏯 Bang hội</button>
+        <button data-menu="hero">🦸 Tướng</button><button data-menu="online">🌐 Online</button><button data-menu="items">🎒 Trang bị</button><button data-menu="shop">🛒 Shop</button><button data-menu="event">🎁 Sự kiện</button><button data-menu="guild">🏯 Bang hội</button>
       </div>
       <div class="lobby-stage"><div id="lb-preview" class="preview-box"></div><div class="stage-info"><div id="lb-hname" class="hname"></div><div id="lb-hrole" class="hrole"></div><div class="tip">Kéo chuột để xoay 360° • Nhấp đúp để tạo dáng</div></div></div>
       <div class="lobby-play">
@@ -77,6 +78,34 @@ export const UI = {
       <div id="shop-panel" class="hidden"></div>
       <div id="pause" class="hidden"><div class="box"><h3>TẠM DỪNG</h3><button id="p-resume" class="btn-big">TIẾP TỤC</button><button id="p-quit" class="btn-sm">Thoát về sảnh (tính thua)</button></div></div>
     </div>
+    <div id="screen-online" class="screen">
+      <div class="sel-head"><h3>🌐 CHƠI ONLINE — GHÉP TRẬN VỚI BẠN BÈ</h3><button id="on-back" class="btn-sm">← Sảnh</button></div>
+      <div class="on-wrap">
+        <div id="on-connect" class="on-panel">
+          <h4>Kết nối máy chủ</h4>
+          <div class="on-row"><input id="on-url" placeholder="ws://localhost:8787"><button id="on-conn" class="btn-sm">Kết nối</button></div>
+          <div id="on-status" class="muted">Chưa kết nối. Chạy <b>npm run server</b> rồi bấm Kết nối (hoặc TẠO PHÒNG tự kết nối).</div>
+          <h4>Vào trận</h4>
+          <div class="on-row"><input id="on-code" placeholder="MÃ PHÒNG" maxlength="4"><button id="on-join" class="btn-sm">Vào phòng</button></div>
+          <button id="on-create" class="btn-big">➕ TẠO PHÒNG</button>
+          <button id="on-quick" class="btn-big">⚡ GHÉP TRẬN NHANH</button>
+          <p class="muted">Không có bạn online? Vẫn đấu với bot như bình thường. Bạn có thể rủ bạn bè vào bằng mã phòng — thiếu người sẽ tự thêm bot.</p>
+        </div>
+        <div id="on-room" class="on-panel hidden">
+          <h4>Phòng <b id="on-rcode"></b> <small class="muted">— gửi mã này cho bạn bè</small></h4>
+          <div class="on-row"><span>Tướng của tôi:</span><select id="on-hero"></select></div>
+          <div id="on-players"></div>
+          <div id="on-log" class="on-log"></div>
+          <div class="on-row"><input id="on-msg" placeholder="Nhắn tin..." maxlength="80"><button id="on-send" class="btn-sm">Gửi</button></div>
+          <div class="on-row">
+            <button id="on-ready" class="btn-sm">☑ SẴN SÀNG</button>
+            <button id="on-start" class="btn-big hidden">🚀 BẮT ĐẦU TRẬN</button>
+            <button id="on-leave" class="btn-sm">Rời phòng</button>
+          </div>
+          <p class="muted">Tất cả chơi chung đội (5v5) — thiếu người sẽ tự thêm bot. Sẵn sàng rồi bấm BẮT ĐẦU.</p>
+        </div>
+      </div>
+    </div>
     <div id="screen-end" class="screen"><div class="end-wrap"><div id="end-title"></div><div id="end-preview" class="preview-box end"></div><div id="end-reward"></div><div id="end-table"></div><div class="end-btns"><button id="end-again" class="btn-big">CHƠI LẠI</button><button id="end-lobby" class="btn-sm">Về sảnh</button></div></div></div>
     <div id="modal" class="hidden"><div class="modal-box"><button class="modal-x" id="modal-x">✕</button><div id="modal-body"></div></div></div>`;
     this.cache(); this.bind();
@@ -103,11 +132,11 @@ export const UI = {
     tap(q('#b-mute'), () => { setMuted(!isMuted()); q('#b-mute').textContent = isMuted() ? '🔇' : '🔊'; });
     tap(q('#b-chat'), () => q('#chat-menu').classList.toggle('hidden'));
     const phrases = ['Tập trung đánh Rồng!', 'Cẩn thận, có địch!', 'Rút lui về trụ!', 'Theo tôi, tiến công!', 'Giỏi lắm!'];
-    q('#chat-menu').innerHTML = phrases.map((p) => `<button>${p}</button>`).join(''); $$('#chat-menu button', this.root).forEach((b) => tap(b, () => { this.feedMsg(`${G.player ? G.player.name : 'Bạn'}: ${b.textContent}`, 0); q('#chat-menu').classList.add('hidden'); }));
+    q('#chat-menu').innerHTML = phrases.map((p) => `<button>${p}</button>`).join(''); $$('#chat-menu button', this.root).forEach((b) => tap(b, () => { if (NET.active) sendChat(b.textContent); else this.feedMsg(`${G.player ? G.player.name : 'Bạn'}: ${b.textContent}`, 0); q('#chat-menu').classList.add('hidden'); }));
     tap(q('#b-atk'), () => H.attack()); tap(q('#b-heal'), () => H.heal()); tap(q('#b-recall'), () => H.recall()); tap(q('#b-shop'), () => this.toggleShop());
     tap(q('#end-again'), () => { this.show('lobby'); this.attachPreview('lb-preview'); this.refreshLobby(); this.openSelect(); });
     tap(q('#end-lobby'), () => { this.show('lobby'); this.attachPreview('lb-preview'); this.refreshLobby(); });
-    this.bindJoystick(); this.bindSkillButtons();
+    this.bindJoystick(); this.bindSkillButtons(); this.bindOnline();
     window.addEventListener('keydown', (e) => { if (e.code === 'Tab' && G.running) { e.preventDefault(); this.el.board.classList.remove('hidden'); this.buildBoard(); } if (e.code === 'KeyP' && G.running) this.toggleShop(); if (e.code === 'Escape' && G.running) this.pause(!G.paused); });
     window.addEventListener('keyup', (e) => { if (e.code === 'Tab') this.el.board.classList.add('hidden'); });
   },
@@ -130,6 +159,7 @@ export const UI = {
   menu(k) {
     const s = G.save; const m = this.el.modal; const body = this.el.modalBody; m.classList.remove('hidden');
     if (k === 'hero') { m.classList.add('hidden'); this.openSelect(); return; }
+    if (k === 'online') { m.classList.add('hidden'); this.openOnline(); return; }
     if (k === 'items') body.innerHTML = `<h3>🎒 Trang bị</h3><div class="item-grid">${ITEMS.map((i) => `<div class="item-card"><span class="ic">${i.icon}</span><b>${i.name}</b><small>${i.desc}</small><em>🪙 ${i.cost}</em></div>`).join('')}</div><h3>Ngọc & Phù hiệu</h3><div class="item-grid">${[...RUNES, ...BADGES].map((r) => `<div class="item-card"><span class="ic">💎</span><b>${r.name}</b></div>`).join('')}</div><p class="muted">Mua trang bị tại cửa hàng NPC trong căn cứ khi chơi (phím P).</p>`;
     if (k === 'shop') {
       body.innerHTML = `<h3>🛒 Cửa hàng tướng — 🪙 <b id="shop-coins">${s.coins}</b></h3><div class="item-grid">${HEROES.map((h) => { const own = s.unlocked.includes(h.id); return `<div class="item-card"><span class="ic" style="background:${grad(h)}">${ICON[h.id]}</span><b>${h.name}</b><small>${h.role}</small>${own ? '<em class="own">Đã sở hữu</em>' : `<button class="btn-sm" data-unlock="${h.id}">Mở khóa 🪙${h.cost}</button>`}</div>`; }).join('')}</div>`;
@@ -141,6 +171,61 @@ export const UI = {
       const d = $('#daily', body); d && d.addEventListener('click', () => { s.coins += 200; s.lastDaily = today; writeSave(); this.refreshLobby(); this.menu('event'); });
     }
     if (k === 'guild') body.innerHTML = `<h3>🏯 Bang hội</h3><p class="muted">Tính năng Bang hội sẽ có ở Phase 4 (multiplayer online qua WebSocket/Colyseus).</p><div class="item-card wide"><b>Bang: Chưa tham gia</b><small>Offline chỉ hỗ trợ chơi với bot.</small></div>`;
+  },
+
+  // ---------- ONLINE ----------
+  openOnline() {
+    this.show('online');
+    const q = (x) => $(x, this.root);
+    q('#on-url').value = NET.url || defaultNetUrl() || '';
+    const s = G.save;
+    q('#on-hero').innerHTML = s.unlocked.map((id) => { const h = HERO_BY_ID[id]; return h ? `<option value="${id}" ${id === NET.myHero ? 'selected' : ''}>${ICON[id] || '🛡️'} ${h.name}</option>` : ''; }).join('');
+    this.renderRoom(); this.onNetStatus();
+  },
+  onNetStatus() { const el = $('#on-status', this.root); if (el) el.textContent = NET.status; },
+  onLog(t) { const el = $('#on-log', this.root); if (!el) return; el.innerHTML += `<div>${t}</div>`; el.scrollTop = el.scrollHeight; },
+  renderRoom() {
+    const q = (x) => $(x, this.root); if (!q('#on-room')) return;
+    const inRoom = !!NET.code;
+    q('#on-connect').classList.toggle('hidden', inRoom);
+    q('#on-room').classList.toggle('hidden', !inRoom);
+    if (!inRoom) return;
+    q('#on-rcode').textContent = NET.code;
+    q('#on-start').classList.toggle('hidden', NET.owner !== NET.id);
+    const me = NET.players.find((p) => p.id === NET.id);
+    q('#on-ready').textContent = me && me.ready ? '✖ ĐÃ SẴN SÀNG' : '☑ SẴN SÀNG';
+    q('#on-players').innerHTML = NET.players.map((p) => {
+      const h = HERO_BY_ID[p.hero] || HEROES[0];
+      return `<div class="on-player ${p.id === NET.id ? 'me' : ''}"><span class="on-pi">${ICON[p.hero] || '🛡️'}</span><b>${p.name}</b><small>${h.name}${p.id === NET.owner ? ' · Quản phòng' : ''}</small><em>${p.ready ? '✅' : '⏳'}</em></div>`;
+    }).join('') + (NET.players.length < 5 ? `<div class="on-player bot"><span class="on-pi">🤖</span><b>Bot</b><small>tự thêm khi thiếu người</small></div>` : '');
+  },
+  bindOnline() {
+    const q = (x) => $(x, this.root); const H = this.handlers;
+    const tap = (el, fn) => el && el.addEventListener('click', (e) => { sfx('click'); fn(e); });
+    const say = (fn) => { setName(G.save.name); setHero(q('#on-hero').value || NET.myHero); fn(); };
+    const ensure = (fn) => { const url = q('#on-url').value.trim() || defaultNetUrl(); if (!url) { this.onLog('⚠ Nhập địa chỉ máy chủ (vd: ws://192.168.1.5:8787)'); return; } netConnect(url, () => say(fn)); };
+    tap(q('#on-back'), () => { this.show('lobby'); this.attachPreview('lb-preview'); this.refreshLobby(); });
+    tap(q('#on-conn'), () => ensure(() => {}));
+    tap(q('#on-create'), () => ensure(() => createRoom()));
+    tap(q('#on-join'), () => { const c = q('#on-code').value.trim().toUpperCase(); if (!c) { this.onLog('⚠ Nhập mã phòng!'); return; } ensure(() => joinRoom(c)); });
+    tap(q('#on-quick'), () => ensure(() => quickMatch()));
+    tap(q('#on-ready'), () => setReady());
+    tap(q('#on-leave'), () => { leaveRoom(); this.renderRoom(); });
+    tap(q('#on-start'), () => startGame(this.cfg.diff));
+    const sendMsg = () => { const v = q('#on-msg').value.trim(); if (v) { sendChat(v); q('#on-msg').value = ''; } };
+    tap(q('#on-send'), sendMsg);
+    q('#on-msg').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') sendMsg(); });
+    q('#on-hero').addEventListener('change', () => setHero(q('#on-hero').value));
+    let lastCode = '';
+    onNet((m) => {
+      if (m.type === 'status') this.onNetStatus();
+      if (m.type === 'room') { this.renderRoom(); if (NET.code && NET.code !== lastCode) { lastCode = NET.code; this.onLog(`✓ Đã vào phòng ${NET.code}`); } }
+      if (m.type === 'err') this.onLog('⚠ ' + m.msg);
+      if (m.type === 'chat') { this.onLog(`${m.name}: ${m.text}`); if (G.running) this.feedMsg(`${m.name}: ${m.text}`, 0); }
+      if (m.type === 'left') this.onLog('✕ Một người chơi đã rời phòng');
+      if (m.type === 'closed') { lastCode = ''; this.onLog('⚠ Mất kết nối máy chủ'); if (G.running) this.feedMsg('Mất kết nối máy chủ!', 1); this.renderRoom(); }
+      if (m.type === 'start') { lastCode = ''; this.onLog('🚀 Trận bắt đầu!'); H.startMatch({ mode: '5v5', diff: m.diff, netPlayers: m.players }); }
+    });
   },
 
   // ---------- CHỌN TƯỚNG ----------

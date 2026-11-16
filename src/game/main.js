@@ -9,10 +9,11 @@ import { MAP_3D, heightAt, buildTerrain, buildWater, updateWater, buildEnvironme
 import { spawnMinion, updateCamps } from './monsters.js';
 import { HEROES, HERO_BY_ID } from './heroes.js';
 import { FX } from './fx.js';
-import { createHero, updateUnits, updateVisuals, updateVision, visionSources, goTo, steerTo, stop, tryAttack, inAttackRange, faceTo, canSee, nearestEnemy, startRecall, useHealSpell, buyItem, sellItem, ITEMS, DIFF, recalc, cancelRecall, isTargetable } from './combat.js';
+import { createHero, updateUnits, updateVisuals, updateVision, visionSources, goTo, steerTo, stop, tryAttack, inAttackRange, faceTo, canSee, nearestEnemy, startRecall, useHealSpell, buyItem, sellItem, ITEMS, DIFF, recalc, cancelRecall, isTargetable, kill } from './combat.js';
 import { castSkill, updateSkills, resetSkills } from './skills.js';import { initBot, updateBot, updateTeamObjectives } from './ai.js';
 import { UI } from './ui.js';
 import { sfx } from './audio.js';
+import { NET, netSend, sendSnap, sendOver, sendInput, leaveRoom, prepNetIdentity } from './net.js';
 
 G.keyMode = 'click'; // PC: click để đi, QWER là chiêu. Mobile: joystick (giữ nguyên)
 let renderer, scene, camera, rig, sun, lights, env;
@@ -27,8 +28,8 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 // KHỞI TẠO
 // ============================================================
 export async function initGame(root) {
-  loadSave();
-  UI.buildDOM(root, { startMatch, cast: castFromUI, attack: attackNearest, heal: () => useHealSpell(G.player), recall: toggleRecall, buy: (id) => buyItem(G.player, id), sell: (i) => sellItem(G.player, i), quit: () => finishMatch(false) });
+  loadSave(); prepNetIdentity(G.save);
+  UI.buildDOM(root, { startMatch, cast: castFromUI, attack: attackNearest, heal: () => { useHealSpell(G.player); sendInput({ k: 'heal' }); }, recall: toggleRecall, buy: (id) => { buyItem(G.player, id); sendInput({ k: 'buy', id }); }, sell: (i) => sellItem(G.player, i), quit: () => finishMatch(false) });
   UI.setProgress(0.05, 'Tạo renderer WebGL (PCFSoft shadow)...'); await nextFrame();
   renderer = createRenderer(UI.el.canvas);
   const s = createScene(); scene = s.scene; sun = s.sun; lights = s.skillLights; G.quality = s.mobile ? 0.5 : 1; G.mobile = s.mobile;
@@ -47,7 +48,7 @@ export async function initGame(root) {
   // vòng chọn mục tiêu + dấu click
   targetRing = new THREE.Mesh(new THREE.RingGeometry(0.9, 1.1, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xff3030, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide })); targetRing.visible = false; targetRing.renderOrder = 6; scene.add(targetRing);
   G.matchGroup = new THREE.Group(); scene.add(G.matchGroup);
-  bindInput(); window.addEventListener('resize', onResize); window.__G = G; window.__dbg = { initBot, castSkill };
+  bindInput(); window.addEventListener('resize', onResize); window.__G = G; window.__dbg = { initBot, castSkill }; window.__NET = NET;
   UI.setProgress(1, 'Sẵn sàng! Nhấn BẮT ĐẦU');
   last = performance.now(); requestAnimationFrame(frame);
 }
@@ -68,18 +69,37 @@ function cleanupMatch() {
 }
 function startMatch(cfg) {
   cleanupMatch(); G.mode = cfg.mode; G.difficulty = cfg.diff; waveT = 6; waveN = 0; visT = fowT = mapT = objT = endT = 0;
+  NET.inputs = []; NET.snap = null; NET.sentOver = false; NET.snapT = 0;
+  G.netMatch = !!(cfg.netPlayers && cfg.netPlayers.length);
   G.towers = buildTowers(G.matchGroup, MAP_3D); G.units.push(...G.towers);
   G.camps = buildJungle(G.matchGroup, MAP_3D);
-  const save = G.save; const pdef = HERO_BY_ID[cfg.heroId];
-  const player = createHero(pdef, 0, { isPlayer: true, name: save.name, rune: cfg.rune, badge: cfg.badge, role: 'mid', slot: 0 }); G.player = player;
+  const save = G.save; const netPlayers = cfg.netPlayers || null;
+  const myNp = netPlayers ? netPlayers.find((p) => p.id === NET.id) : null;
+  const pdef = HERO_BY_ID[(myNp && myNp.hero) || cfg.heroId] || HERO_BY_ID.binhan;
+  const player = createHero(pdef, 0, { isPlayer: true, name: (myNp && myNp.name) || save.name, rune: cfg.rune, badge: cfg.badge, role: 'mid', slot: 0 });
+  if (myNp) player.netId = myNp.id;
+  G.player = player;
   const startItem = ITEMS.find((i) => i.id === ['sword', 'staff', 'armor', 'boots'][cfg.start || 0]); if (startItem && player.gold >= startItem.cost) buyItem(player, startItem.id);
-  // chọn tướng cho bot (không trùng nhau)
-  let pool = HEROES.filter((h) => h.id !== pdef.id); const prefs = { jungle: ['leanh', 'khaikiet', 'dat'], top: ['tuan', 'binhan', 'dat'], mid: ['khoa', 'tung', 'khaikiet'], bot: ['annie', 'tung', 'truongan', 'thaonhi'] };
+  // chọn tướng cho bot (không trùng nhau, trừ tướng người chơi online)
+  let pool = HEROES.filter((h) => h.id !== pdef.id && !(netPlayers && netPlayers.some((np) => np.hero === h.id))); const prefs = { jungle: ['leanh', 'khaikiet', 'dat'], top: ['tuan', 'binhan', 'dat'], mid: ['khoa', 'tung', 'khaikiet'], bot: ['annie', 'tung', 'truongan', 'thaonhi'] };
   const take = (role) => { const id = (prefs[role] || []).find((x) => pool.some((h) => h.id === x)); const h = id ? pool.find((p) => p.id === id) : pick(pool); pool = pool.filter((p) => p !== h); return h; };
   const slots = cfg.mode === '1v1' ? [[], ['mid']] : [['top', 'bot', 'bot', 'jungle'], ['top', 'mid', 'bot', 'bot', 'jungle']];
   const redOrder = slots[1].slice(); // hạ priority support: bot đầu tiên là xạ thủ
-  prefs.support = ['truongan', 'thaonhi']; let nb = 0;
-  slots[0].forEach((role, i) => { const def = take(role === 'bot' ? (nb++ === 1 ? 'support' : 'bot') : role); mkBot(def, 0, role, i + 1); }); nb = 0;
+  prefs.support = ['truongan', 'thaonhi'];
+  // bạn bè cùng đội (online): tạo tướng người cho họ
+  const remotes = netPlayers ? netPlayers.filter((p) => p.id !== NET.id) : [];
+  remotes.forEach((np, i) => {
+    const def = HERO_BY_ID[np.hero] || pdef;
+    const h = createHero(def, 0, { name: np.name, role: slots[0][i] || 'mid', slot: i + 1, rune: 0, badge: 0 });
+    h.netId = np.id;
+  });
+  // bot lấp đầy nốt (đội ta tổng 5 người)
+  let nb = 0;
+  slots[0].forEach((role, i) => {
+    if (i < remotes.length) return; // slot này đã có bạn bè online
+    const def = take(role === 'bot' ? (nb++ === 1 ? 'support' : 'bot') : role); mkBot(def, 0, role, i + 1);
+  });
+  nb = 0;
   redOrder.forEach((role, i) => { const def = take(role === 'bot' ? (nb++ === 1 ? 'support' : 'bot') : role); mkBot(def, 1, role, i); });
   // thế giới
   G.heroes.forEach((h) => { h.pos.y = heightAt(h.pos.x, h.pos.z); });
@@ -93,6 +113,7 @@ function mkBot(def, team, role, slot) {
 }
 function finishMatch(win) {
   if (!G.running) return; G.running = false; const s = G.save; const p = G.player;
+  if (NET.active) leaveRoom(); // online: rời phòng khi trận xong
   const coins = win ? 150 + p.kills * 8 : 50 + p.kills * 4; const exp = win ? 90 : 35; const before = rankOf(s.stars).name;
   s.coins += coins; s.exp += exp; s.games++; let levelUp = false; while (s.exp >= 100 + s.level * 60) { s.exp -= 100 + s.level * 60; s.level++; levelUp = true; }
   let delta = 0; if (win) { s.wins++; delta = 1; } else if (s.stars > 0) delta = -1; s.stars = Math.max(0, s.stars + delta); writeSave();
@@ -121,12 +142,13 @@ function pickEnemy(cx, cy) {
 function clickAt(cx, cy, right) {
   const p = G.player; if (!G.running || G.paused || !p || !p.alive) return; if (G.over) return;
   const e = pickEnemy(cx, cy);
-  if (e) { p.target = e; p.path = null; p.dest = null; cancelRecall(p); sfx('click'); return; }
+  if (e) { p.target = e; p.path = null; p.dest = null; cancelRecall(p); sfx('click'); sendInput({ k: 'atk', id: e.id }); return; }
   const g = pickGround(cx, cy); if (!g) return; void right;
   p.target = null; goTo(p, g.x, g.z, true); cancelRecall(p); G.fx.ring(g.x, g.y, g.z, 1.2, 0x66ff99, 0.45, { r0: 0.3 });
+  sendInput({ k: 'mv', x: +g.x.toFixed(2), z: +g.z.toFixed(2) });
 }
 function aimPoint() { const p = G.player; if (mouse.has) return mouse.ground; return { x: p.pos.x + Math.sin(p.yaw) * 5, z: p.pos.z + Math.cos(p.yaw) * 5 }; }
-function castKey(i) { const p = G.player; if (!G.running || G.paused || !p) return; const ok = castSkill(p, i, aimPoint()); if (ok) { p.path = null; p.dest = null; } }
+function castKey(i) { const p = G.player; if (!G.running || G.paused || !p) return; const aim = aimPoint(); const ok = castSkill(p, i, aim); if (ok) { p.path = null; p.dest = null; sendInput({ k: 'cast', i, x: +aim.x.toFixed(2), z: +aim.z.toFixed(2) }); } }
 // Gọi từ nút skill mobile: drag = {x,y} px màn hình hoặc null (ngắm tự động)
 function castFromUI(i, drag) {
   const p = G.player; if (!G.running || G.paused || !p || !p.alive) return; const sk = p.def.skills[i]; const range = sk.range || sk.radius || 6; let aim;
@@ -137,13 +159,14 @@ function castFromUI(i, drag) {
     aim = t ? { x: t.pos.x, z: t.pos.z } : { x: p.pos.x + Math.sin(p.yaw) * 6, z: p.pos.z + Math.cos(p.yaw) * 6 };
   }
   castSkill(p, i, aim);
+  if (p.cd[i] > 0) sendInput({ k: 'cast', i, x: +aim.x.toFixed(2), z: +aim.z.toFixed(2) });
 }
 function attackNearest() {
   const p = G.player; if (!G.running || !p || !p.alive) return;
   const t = nearestEnemy(p, p.stats.range + 3.5, { prefer: (u) => u.kind === 'hero' }) || nearestEnemy(p, 16, { prefer: (u) => u.kind === 'hero' });
-  if (t) { p.target = t; p.path = null; p.dest = null; cancelRecall(p); }
+  if (t) { p.target = t; p.path = null; p.dest = null; cancelRecall(p); sendInput({ k: 'aa' }); }
 }
-function toggleRecall() { const p = G.player; if (!p || !p.alive) return; if (p.recallT > 0) cancelRecall(p); else { stop(p); startRecall(p); } }
+function toggleRecall() { const p = G.player; if (!p || !p.alive) return; if (p.recallT > 0) { cancelRecall(p); sendInput({ k: 'recall' }); } else { stop(p); startRecall(p); sendInput({ k: 'recall' }); } }
 
 function bindInput() {
   const cv = UI.el.canvas; const wrap = document.documentElement;
@@ -161,7 +184,7 @@ function bindInput() {
     if (e.code === 'KeyQ') castKey(0);
     if (e.code === 'KeyE') castKey(2); if (e.code === 'KeyR') castKey(3);
     if (e.code === 'KeyW') castKey(1);
-    if (e.code === 'Space') attackNearest(); if (e.code === 'KeyF') useHealSpell(G.player); if (e.code === 'KeyB') toggleRecall();
+    if (e.code === 'Space') attackNearest(); if (e.code === 'KeyF') { useHealSpell(G.player); sendInput({ k: 'heal' }); } if (e.code === 'KeyB') toggleRecall();
     if (e.code === 'F1') { G.debug.hitbox = !G.debug.hitbox; UI.feedMsg('F1 Hitbox: ' + (G.debug.hitbox ? 'BẬT' : 'TẮT'), 0); }
     if (e.code === 'F2') { G.player.gold += 1000; G.player.goldTotal += 1000; UI.feedMsg('F2: +1000 vàng', 0); }
     if (e.code === 'F3') { G.debug.paths = !G.debug.paths; UI.feedMsg('F3 Đường bot: ' + (G.debug.paths ? 'BẬT' : 'TẮT'), 0); }
@@ -208,9 +231,16 @@ function controlPlayer() {
     const f = { x: -Math.sin(rig.yaw), z: -Math.cos(rig.yaw) }, r = { x: Math.cos(rig.yaw), z: -Math.sin(rig.yaw) };
     p.inputX = f.x * sy + r.x * sx; p.inputZ = f.z * sy + r.z * sx; p.target = null; p.path = null; p.dest = null; cancelRecall(p);
   } else { p.inputX = p.inputZ = 0; }
+  controlHero(p);
+}
+
+// Logic tấn công/di chuyển theo mục tiêu — dùng cho tướng do người chơi điều khiển
+// (người chơi local + tướng online của bạn bè trên máy chủ)
+function controlHero(p) {
+  if (!p.alive || p.stunT > 0 || p.airT > 0) return;
   const moving = p.inputX || p.inputZ;
   if (!moving && p.target) {
-    const t = p.target; if (!t.alive || (!canSee(0, t) && t.kind !== 'tower' && t.kind !== 'nexus') || !isTargetable(t)) p.target = null;
+    const t = p.target; if (!t.alive || (!canSee(p.team, t) && t.kind !== 'tower' && t.kind !== 'nexus') || !isTargetable(t)) p.target = null;
     else if (inAttackRange(p, t)) { stop(p); faceTo(p, t.pos.x, t.pos.z); tryAttack(p, t); }
     else if (hasLOS(p.pos.x, p.pos.z, t.pos.x, t.pos.z)) steerTo(p, t.pos.x, t.pos.z); else goTo(p, t.pos.x, t.pos.z);
   } else if (!moving && !p.path && !p.dest && p.recallT <= 0) {
@@ -231,12 +261,67 @@ function spawnWave() {
 }
 
 // ============================================================
+// ONLINE — đồng bộ input + snapshot giữa các người chơi
+// ============================================================
+function applyNetInput(h, m) {
+  if (!h || !m) { window.__NET && (window.__NET.dbgNoHero = (window.__NET.dbgNoHero || 0) + 1); return; }
+  if (m.k === 'cast') { if (!h.alive) return; const ok = castSkill(h, m.i, { x: m.x, z: m.z }); window.__NET && (window.__NET.dbgCast = (window.__NET.dbgCast || 0) + (ok ? 1 : 100)); if (ok) { h.path = null; h.dest = null; } return; }
+  if (m.k === 'mv') { if (!h.alive) return; h.target = null; goTo(h, m.x, m.z, true); cancelRecall(h); }
+  else if (m.k === 'atk') { if (!h.alive) return; const t = G.units.find((u) => u.id === m.id); if (t && t.alive) { h.target = t; h.path = null; h.dest = null; cancelRecall(h); } }
+  else if (m.k === 'cast') { if (!h.alive) return; if (castSkill(h, m.i, { x: m.x, z: m.z })) { h.path = null; h.dest = null; } }
+  else if (m.k === 'aa') { if (!h.alive) return; const t = nearestEnemy(h, h.stats.range + 3.5, { prefer: (u) => u.kind === 'hero' }) || nearestEnemy(h, 16, { prefer: (u) => u.kind === 'hero' }); if (t) { h.target = t; h.path = null; h.dest = null; cancelRecall(h); } }
+  else if (m.k === 'buy') buyItem(h, m.id);
+  else if (m.k === 'heal') useHealSpell(h);
+  else if (m.k === 'recall') { if (!h.alive) return; if (h.recallT > 0) cancelRecall(h); else { stop(h); startRecall(h); } }
+}
+function buildSnap() {
+  return { players: G.heroes.filter((h) => h.netId).map((h) => ({
+    id: h.netId, x: +h.pos.x.toFixed(2), y: +h.pos.y.toFixed(2), z: +h.pos.z.toFixed(2), yaw: +h.yaw.toFixed(2),
+    hp: Math.round(h.hp), mp: Math.round(h.mana), lv: h.level, exp: h.exp | 0, gold: Math.round(h.gold),
+    alive: h.alive ? 1 : 0, rt: Math.ceil(h.respawnT), cds: h.cd.map((v) => +(v || 0).toFixed(1)),
+    k: h.kills, d: h.deaths, a: h.assists, cs: h.cs,
+  })) };
+}
+function applySnap(s) {
+  if (!s || !s.players) return;
+  for (const ps of s.players) {
+    const h = G.heroes.find((x) => x.netId === ps.id); if (!h) continue;
+    if (!ps.alive && h.alive) kill(h, null);
+    else if (ps.alive && !h.alive) h.respawnT = 0.05; // host đã hồi sinh -> hồi theo
+    else if (!ps.alive && !h.alive) h.respawnT = ps.rt;
+    if (h.level !== ps.lv) { h.level = ps.lv; recalc(h, true); }
+    h.hp = Math.min(ps.hp, h.maxHp); h.mana = ps.mp; h.exp = ps.exp; h.gold = ps.gold;
+    for (let i = 0; i < 4; i++) h.cd[i] = ps.cds[i] || 0;
+    h.kills = ps.k; h.deaths = ps.d; h.assists = ps.a; h.cs = ps.cs;
+    const far = Math.hypot(h.pos.x - ps.x, h.pos.z - ps.z);
+    if (h !== G.player ? far > 2.2 : far > 4) { h.pos.set(ps.x, ps.y, ps.z); h.yaw = ps.yaw; }
+  }
+}
+function netSync(dt) {
+  if (!NET.active || !G.running) return;
+  while (NET.inputs.length) {
+    const it = NET.inputs.shift();
+    const h = G.heroes.find((x) => x.netId === it.id);
+    if (h) applyNetInput(h, it.m);
+  }
+  if (NET.owner === NET.id) { // HOST: phát trạng thái cho cả phòng
+    NET.snapT -= dt;
+    if (NET.snapT <= 0) { NET.snapT = 0.12; sendSnap(buildSnap()); }
+    if (G.over && !NET.sentOver) { NET.sentOver = true; sendOver(G.winner); }
+  } else {                    // KHÁCH: nhận snapshot + lệnh kết thúc từ host
+    if (NET.snap) { applySnap(NET.snap); NET.snap = null; }
+    if (NET.overMsg !== null && NET.overMsg !== undefined) { if (!G.over) { G.over = true; G.winner = NET.overMsg; } NET.overMsg = null; }
+  }
+}
+
+// ============================================================
 // UPDATE
 // ============================================================
 function update(dt) {
   G.time += dt; updateTimers(dt);
   controlPlayer();
-  for (const h of G.heroes) if (h.isBot) updateBot(h, G, dt);
+  for (const h of G.heroes) { if (h.isBot) updateBot(h, G, dt); else if (h.netId && h !== G.player) controlHero(h); }
+  netSync(dt);
   waveT -= dt; if (waveT <= 0 && !G.over) { waveT = 30; spawnWave(); }
   updateCamps(G.camps, dt);
   for (const ev of G.events) if (ev.type === 'camp') { const c = ev.camp; if (c.type === 'dragon') { UI.banner('RỒNG ĐÃ XUẤT HIỆN!', { gold: true }); } if (c.type === 'baron') UI.banner('TÀ THẦN ĐÃ XUẤT HIỆN!', { red: true }); }
