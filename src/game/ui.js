@@ -9,7 +9,7 @@ import { HEROES, HERO_BY_ID, HeroPreview } from './heroes.js';
 import { ITEMS, RUNES, BADGES, DIFF, expToNext, skillLevel } from './combat.js';
 import { MAP_3D, TERRAIN_CANVAS, BASE_INFO } from './map.js';
 import { sfx, setMuted, isMuted } from './audio.js';
-import { NET, onNet, netConnect, defaultNetUrl, createRoom, joinRoom, quickMatch, leaveRoom, setReady, setHero, setName, startGame, sendChat } from './net.js';
+import { NET, onNet, createRoom, joinRoom, quickMatch, leaveRoom, setReady, setHero, setName, startGame, sendChat } from './net.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -82,14 +82,17 @@ export const UI = {
       <div class="sel-head"><h3>🌐 CHƠI ONLINE — GHÉP TRẬN VỚI BẠN BÈ</h3><button id="on-back" class="btn-sm">← Sảnh</button></div>
       <div class="on-wrap">
         <div id="on-connect" class="on-panel">
-          <h4>Kết nối máy chủ</h4>
-          <div class="on-row"><input id="on-url" placeholder="ws://localhost:8787"><button id="on-conn" class="btn-sm">Kết nối</button></div>
-          <div id="on-status" class="muted">Chưa kết nối. Chạy <b>npm run server</b> rồi bấm Kết nối (hoặc TẠO PHÒNG tự kết nối).</div>
-          <h4>Vào trận</h4>
+          <h4>🌐 CHƠI ONLINE — KHÔNG CẦN SERVER</h4>
+          <div id="on-status" class="muted">Sẵn sàng. Bấm TẠO PHÒNG rồi gửi mã cho bạn bè, hoặc GHÉP TRẬN NHANH để vào phòng đang mở.</div>
+          <h4>Chế độ</h4>
+          <div class="seg sm" id="on-mode"><button data-v="5v5" class="on">⚔️ 5 VS 5</button><button data-v="1v1">🥊 1 VS 1 (SOLO)</button></div>
+          <h4>Vào trận cùng bạn bè</h4>
           <div class="on-row"><input id="on-code" placeholder="MÃ PHÒNG" maxlength="4"><button id="on-join" class="btn-sm">Vào phòng</button></div>
           <button id="on-create" class="btn-big">➕ TẠO PHÒNG</button>
           <button id="on-quick" class="btn-big">⚡ GHÉP TRẬN NHANH</button>
-          <p class="muted">Không có bạn online? Vẫn đấu với bot như bình thường. Bạn có thể rủ bạn bè vào bằng mã phòng — thiếu người sẽ tự thêm bot.</p>
+          <h4>Hoặc chơi một mình</h4>
+          <button id="on-solo" class="btn-sm">🎯 SOLO ĐẤU VỚI BOT</button>
+          <p class="muted">Chơi online qua mạng, không cần server riêng. Tạo phòng rủ bạn bè bằng mã, hoặc ghép nhanh với người lạ — thiếu người sẽ tự thêm bot. Chọn 1vs1 để đấu solo giữa đường.</p>
         </div>
         <div id="on-room" class="on-panel hidden">
           <h4>Phòng <b id="on-rcode"></b> <small class="muted">— gửi mã này cho bạn bè</small></h4>
@@ -177,9 +180,9 @@ export const UI = {
   openOnline() {
     this.show('online');
     const q = (x) => $(x, this.root);
-    q('#on-url').value = NET.url || defaultNetUrl() || '';
     const s = G.save;
     q('#on-hero').innerHTML = s.unlocked.map((id) => { const h = HERO_BY_ID[id]; return h ? `<option value="${id}" ${id === NET.myHero ? 'selected' : ''}>${ICON[id] || '🛡️'} ${h.name}</option>` : ''; }).join('');
+    $$('#on-mode button', this.root).forEach((b) => b.classList.toggle('on', b.dataset.v === (this.cfg.onMode || '5v5')));
     this.renderRoom(); this.onNetStatus();
   },
   onNetStatus() { const el = $('#on-status', this.root); if (el) el.textContent = NET.status; },
@@ -203,15 +206,18 @@ export const UI = {
     const q = (x) => $(x, this.root); const H = this.handlers;
     const tap = (el, fn) => el && el.addEventListener('click', (e) => { sfx('click'); fn(e); });
     const say = (fn) => { setName(G.save.name); setHero(q('#on-hero').value || NET.myHero); fn(); };
-    const ensure = (fn) => { const url = q('#on-url').value.trim() || defaultNetUrl(); if (!url) { this.onLog('⚠ Nhập địa chỉ máy chủ (vd: ws://192.168.1.5:8787)'); return; } netConnect(url, () => say(fn)); };
     tap(q('#on-back'), () => { this.show('lobby'); this.attachPreview('lb-preview'); this.refreshLobby(); });
-    tap(q('#on-conn'), () => ensure(() => {}));
-    tap(q('#on-create'), () => ensure(() => createRoom()));
-    tap(q('#on-join'), () => { const c = q('#on-code').value.trim().toUpperCase(); if (!c) { this.onLog('⚠ Nhập mã phòng!'); return; } ensure(() => joinRoom(c)); });
-    tap(q('#on-quick'), () => ensure(() => quickMatch()));
+    tap(q('#on-create'), () => say(() => createRoom()));
+    tap(q('#on-join'), () => { const c = q('#on-code').value.trim().toUpperCase(); if (!c) { this.onLog('⚠ Nhập mã phòng!'); return; } say(() => joinRoom(c)); });
+    tap(q('#on-quick'), () => say(() => quickMatch()));
     tap(q('#on-ready'), () => setReady());
     tap(q('#on-leave'), () => { leaveRoom(); this.renderRoom(); });
-    tap(q('#on-start'), () => startGame(this.cfg.diff));
+    tap(q('#on-start'), () => startGame(this.cfg.diff, this.cfg.onMode || '5v5'));
+    $$('#on-mode button', this.root).forEach((b) => tap(b, () => {
+      this.cfg.onMode = b.dataset.v;
+      $$('#on-mode button', this.root).forEach((x) => x.classList.toggle('on', x === b));
+    }));
+    tap(q('#on-solo'), () => { this.cfg.mode = this.cfg.onMode || '5v5'; this.openSelect(); });
     const sendMsg = () => { const v = q('#on-msg').value.trim(); if (v) { sendChat(v); q('#on-msg').value = ''; } };
     tap(q('#on-send'), sendMsg);
     q('#on-msg').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') sendMsg(); });
@@ -223,8 +229,8 @@ export const UI = {
       if (m.type === 'err') this.onLog('⚠ ' + m.msg);
       if (m.type === 'chat') { this.onLog(`${m.name}: ${m.text}`); if (G.running) this.feedMsg(`${m.name}: ${m.text}`, 0); }
       if (m.type === 'left') this.onLog('✕ Một người chơi đã rời phòng');
-      if (m.type === 'closed') { lastCode = ''; this.onLog('⚠ Mất kết nối máy chủ'); if (G.running) this.feedMsg('Mất kết nối máy chủ!', 1); this.renderRoom(); }
-      if (m.type === 'start') { lastCode = ''; this.onLog('🚀 Trận bắt đầu!'); H.startMatch({ mode: '5v5', diff: m.diff, netPlayers: m.players }); }
+      if (m.type === 'closed') { lastCode = ''; this.onLog('⚠ Mất kết nối phòng'); if (G.running) this.feedMsg('Mất kết nối phòng!', 1); this.renderRoom(); }
+      if (m.type === 'start') { lastCode = ''; this.onLog('🚀 Trận bắt đầu!'); H.startMatch({ mode: m.mode || '5v5', diff: m.diff, netPlayers: m.players }); }
     });
   },
 
