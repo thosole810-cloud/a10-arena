@@ -35,18 +35,26 @@ function publishPacket(topic, payload, retain) {
 // Tạo 1 phiên MQTT. Trả về { publish(topic, payload, retain), subscribe(topic), close() }
 // onMsg(topic, payload) cho mọi packet PUBLISH nhận được.
 export function mqttSession(onMsg, onReady, onFail) {
-  let i = 0, ws = null, buf = new Uint8Array(0), alive = null, done = false;
-  const fail = () => { if (done) return; done = true; cleanup(); if (i + 1 < BROKERS.length) open(); else onFail && onFail(); };
-  const cleanup = () => { if (alive) clearInterval(alive); alive = null; try { ws && ws.close(); } catch (e) { /* */ } };
+  let i = 0, ws = null, buf = new Uint8Array(0), alive = null, done = false, connTimer = null;
+  const cleanup = () => { if (connTimer) clearTimeout(connTimer); connTimer = null; if (alive) clearInterval(alive); alive = null; try { ws && ws.close(); } catch (e) { /* */ } };
+  const fail = () => {
+    if (done) return;
+    if (i + 1 < BROKERS.length) {
+      if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close(); } catch (e) { /* */ } }
+      buf = new Uint8Array(0); clearTimeout(connTimer);
+      open(); // thử broker tiếp theo
+    } else { done = true; cleanup(); onFail && onFail(); }
+  };
 
   function open() {
     const url = BROKERS[i++];
     try { ws = new WebSocket(url, 'mqtt'); } catch (e) { fail(); return; }
-    const timer = setTimeout(fail, 6000);
-    ws.onopen = () => { clearTimeout(timer); ws.send(connectPacket('a10' + Math.random().toString(36).slice(2, 10))); };
+    ws.binaryType = 'arraybuffer'; // ev.data phải là ArrayBuffer, không phải Blob
+    connTimer = setTimeout(fail, 6000); // 6s không có CONNACK -> đổi broker
+    ws.onopen = () => { try { ws.send(connectPacket('a10' + Math.random().toString(36).slice(2, 10))); } catch (e) { fail(); } };
     ws.onmessage = (ev) => feed(new Uint8Array(ev.data));
-    ws.onerror = () => { clearTimeout(timer); fail(); };
-    ws.onclose = () => { clearTimeout(timer); if (!done) fail(); };
+    ws.onerror = () => fail();
+    ws.onclose = () => { if (!done) fail(); };
   }
   function feed(chunk) {
     const n = new Uint8Array(buf.length + chunk.length); n.set(buf); n.set(chunk, buf.length); buf = n;
@@ -58,7 +66,7 @@ export function mqttSession(onMsg, onReady, onFail) {
       if (buf.length < total) return;
       const type = buf[0] >> 4;
       if (type === 2) { // CONNACK: payload = [flags, returnCode]
-        if (buf[off + 1] === 0) { done = true; onReady && onReady(); } else fail();
+        if (buf[off + 1] === 0) { clearTimeout(connTimer); connTimer = null; buf = new Uint8Array(0); done = true; onReady && onReady(); } else fail();
       } else if (type === 3) { // PUBLISH qos0
         const tLen = (buf[off] << 8) | buf[off + 1];
         const topic = new TextDecoder().decode(buf.subarray(off + 2, off + 2 + tLen));
