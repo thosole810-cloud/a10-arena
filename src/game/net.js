@@ -31,7 +31,7 @@ const emit = (type, data = {}) => { for (const cb of NET.cbs) { try { cb({ type,
 const trace = (s) => { NET.diag.push(Date.now() % 100000 + ' ' + s); if (NET.diag.length > 60) NET.diag.shift(); };
 function setStatus(s) { NET.status = s; emit('status'); }
 const roster = () => NET.players.map((p) => ({ id: p.id, name: p.name, hero: p.hero, ready: p.ready }));
-const pub = (topic, o) => { try { if (NET.session && NET.session.ready) NET.session.publish(topic, enc(o)); } catch (e) { trace('pub ERR ' + e.message); } };
+const pub = (topic, o) => { trace('pub ' + topic.split('/').slice(-2).join('/') + ':' + (o.t || '')); try { if (NET.session && NET.session.ready) NET.session.publish(topic, enc(o)); } catch (e) { trace('pub ERR ' + e.message); } };
 const sendOut = (o) => pub(outTopic(NET.code), o);
 
 // ---------- quảng bá phòng (cho GHÉP TRẬN NHANH) ----------
@@ -55,7 +55,7 @@ function resetState(closeSession = true) {
   announceOff();
   if (closeSession && NET.session) { try { NET.session.close(); } catch (e) { /* */ } }
   NET.session = null;
-  NET.code = NET.gid = NET.owner = null; NET.players = [];
+  NET.code = NET.gid = NET.owner = NET.id = null; NET.players = [];
   NET.isHost = NET.active = NET.started = NET.sentOver = false;
   NET.inputs = []; NET.snap = null; NET.overMsg = null; NET._joinFail = null;
 }
@@ -73,6 +73,7 @@ function hostOnMsg(topic, payload) {
   if (!m || m[1] !== NET.code) return;
   const gid = m[2];
   const msg = parse(payload); if (!msg) return;
+  trace('host recv in:' + msg.t);
   const me = NET.players.find((p) => p.id === gid);
   switch (msg.t) {
     case 'join': {
@@ -137,13 +138,15 @@ function guestMsg(msg) {
 
 // ---------- vào phòng (dùng cho VÀO PHÒNG và GHÉP NHANH) ----------
 function joinInternal(code, timeoutMs, onFail) {
-  NET.code = code; NET.owner = null; NET.isHost = false; NET.active = true; NET.gid = rid();
+  NET.code = code; NET.owner = null; NET.isHost = false; NET.active = true; NET.gid = NET.id = rid();
   let gotRoom = false, timer = null;
   const out = outTopic(code);
   NET.session = mqttSession(
     (topic, payload) => {
+      trace('got ' + topic);
       if (topic !== out) return;
       const msg = parse(payload); if (!msg) return;
+      trace('recv out:' + msg.t);
       if (msg.to && msg.to !== NET.gid) return;
       if (msg.t === 'room' && !gotRoom) { gotRoom = true; clearTimeout(timer); setStatus('Đã kết nối ✓'); }
       if (msg.t === 'err' && !gotRoom) { clearTimeout(timer); onFail(msg.msg); return; }
@@ -163,7 +166,7 @@ export function createRoom() {
   resetState(); emit('room');
   setStatus('Đang tạo phòng...');
   const code = makeCode();
-  NET.code = code; NET.owner = 'H'; NET.gid = 'H'; NET.isHost = true; NET.active = true;
+  NET.code = code; NET.owner = NET.gid = NET.id = 'H'; NET.isHost = true; NET.active = true;
   NET.players = [{ id: 'H', name: NET.myName || 'Người chơi', hero: NET.myHero, ready: false }];
   NET.session = mqttSession(
     (topic, payload) => { if (topic.startsWith(`a10/room/${code}/in/`)) hostOnMsg(topic, payload); },

@@ -14,22 +14,28 @@ const encStr = (s) => { const b = new TextEncoder().encode(s); const a = new Uin
 const encLen = (n) => { const out = []; do { let d = n % 128; n = Math.floor(n / 128); if (n > 0) d |= 128; out.push(d); } while (n > 0); return out; };
 const concat = (chunks, total) => { const a = new Uint8Array(total); let o = 0; for (const c of chunks) { a.set(c, o); o += c.length; } return a; };
 
+// fixed header = 1 byte type + 1..4 byte remaining length (không phải luôn 2 byte!)
+const frame = (flag, body) => {
+  const len = encLen(body.length);
+  const head = new Uint8Array([flag, ...len]);
+  return concat([head, body], head.length + body.length);
+};
 function connectPacket(id) {
   const proto = encStr('MQTT');
   const cid = encStr(id);
   const body = concat([proto, new Uint8Array([4, 2, 0, 60]), cid], proto.length + 4 + cid.length);
-  return concat([new Uint8Array([0x10, ...encLen(body.length)]), body], 2 + body.length);
+  return frame(0x10, body);
 }
 function subscribePacket(topic, pid) {
   const t = encStr(topic);
   const body = concat([new Uint8Array([(pid >> 8) & 255, pid & 255]), t, new Uint8Array([0])], 2 + t.length + 1);
-  return concat([new Uint8Array([0x82, ...encLen(body.length)]), body], 2 + body.length);
+  return frame(0x82, body);
 }
 function publishPacket(topic, payload, retain) {
   const t = encStr(topic);
   const p = new TextEncoder().encode(payload);
   const body = concat([t, p], t.length + p.length);
-  return concat([new Uint8Array([(retain ? 0x31 : 0x30), ...encLen(body.length)]), body], 2 + body.length);
+  return frame(retain ? 0x31 : 0x30, body);
 }
 
 // Tạo 1 phiên MQTT. Trả về { publish(topic, payload, retain), subscribe(topic), close() }
