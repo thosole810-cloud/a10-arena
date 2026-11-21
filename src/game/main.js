@@ -75,22 +75,28 @@ function startMatch(cfg) {
   G.camps = buildJungle(G.matchGroup, MAP_3D);
   const save = G.save; const netPlayers = cfg.netPlayers || null;
   const myNp = netPlayers ? netPlayers.find((p) => p.id === NET.id) : null;
+  // 1v1 có bạn bè: người thứ nhất đội xanh, người thứ hai đội đỏ (đối đầu nhau)
+  const duel = cfg.mode === '1v1' && !!(netPlayers && netPlayers.length >= 2);
+  const myIdx = netPlayers ? netPlayers.findIndex((p) => p.id === NET.id) : 0;
+  const myTeam = duel && myIdx > 0 ? 1 : 0;
   const pdef = HERO_BY_ID[(myNp && myNp.hero) || cfg.heroId] || HERO_BY_ID.binhan;
-  const player = createHero(pdef, 0, { isPlayer: true, name: (myNp && myNp.name) || save.name, rune: cfg.rune, badge: cfg.badge, role: 'mid', slot: 0 });
+  const player = createHero(pdef, myTeam, { isPlayer: true, name: (myNp && myNp.name) || save.name, rune: cfg.rune, badge: cfg.badge, role: 'mid', slot: 0 });
   if (myNp) player.netId = myNp.id;
   G.player = player;
   const startItem = ITEMS.find((i) => i.id === ['sword', 'staff', 'armor', 'boots'][cfg.start || 0]); if (startItem && player.gold >= startItem.cost) buyItem(player, startItem.id);
   // chọn tướng cho bot (không trùng nhau, trừ tướng người chơi online)
   let pool = HEROES.filter((h) => h.id !== pdef.id && !(netPlayers && netPlayers.some((np) => np.hero === h.id))); const prefs = { jungle: ['leanh', 'khaikiet', 'dat'], top: ['tuan', 'binhan', 'dat'], mid: ['khoa', 'tung', 'khaikiet'], bot: ['annie', 'tung', 'truongan', 'thaonhi'] };
   const take = (role) => { const id = (prefs[role] || []).find((x) => pool.some((h) => h.id === x)); const h = id ? pool.find((p) => p.id === id) : pick(pool); pool = pool.filter((p) => p !== h); return h; };
-  const slots = cfg.mode === '1v1' ? [[], ['mid']] : [['top', 'bot', 'bot', 'jungle'], ['top', 'mid', 'bot', 'bot', 'jungle']];
+  const slots = cfg.mode === '1v1' ? [[], duel ? [] : ['mid']] : [['top', 'bot', 'bot', 'jungle'], ['top', 'mid', 'bot', 'bot', 'jungle']];
   const redOrder = slots[1].slice(); // hạ priority support: bot đầu tiên là xạ thủ
   prefs.support = ['truongan', 'thaonhi'];
-  // bạn bè cùng đội (online): tạo tướng người cho họ
+  // bạn bè online: 5v5 cùng đội xanh; 1v1 thì mỗi người một đội
   const remotes = netPlayers ? netPlayers.filter((p) => p.id !== NET.id) : [];
   remotes.forEach((np, i) => {
     const def = HERO_BY_ID[np.hero] || pdef;
-    const h = createHero(def, 0, { name: np.name, role: slots[0][i] || 'mid', slot: i + 1, rune: 0, badge: 0 });
+    const idx = netPlayers.findIndex((p) => p.id === np.id);
+    const team = duel && idx > 0 ? 1 : 0;
+    const h = createHero(def, team, { name: np.name, role: team ? 'mid' : (slots[0][i] || 'mid'), slot: i + 1, rune: 0, badge: 0 });
     h.netId = np.id;
   });
   // bot lấp đầy nốt (đội ta tổng 5 người)
@@ -332,7 +338,7 @@ function update(dt) {
   fowT -= dt; if (fowT <= 0) { fowT = 0.4; updateFow(visionSources[0]); }
   fountT -= dt; if (fountT <= 0) { fountT = 0.12; for (const b of BASE_INFO) if (b.fountain) G.fx.aura(b.fountain.x + rand(-1.5, 1.5), heightAt(b.fountain.x, b.fountain.z) + 0.8, b.fountain.z + rand(-1.5, 1.5), 0x7fe6ff, 0.35, 2.6, 0.2, 1.2); }
   if (G.over && !G.endFlag) { G.endFlag = true; endT = 2.6; }
-  if (G.endFlag && G.over) { endT -= dt; if (endT <= 0) { G.endFlag = false; finishMatch(G.winner === 0); } }
+  if (G.endFlag && G.over) { endT -= dt; if (endT <= 0) { G.endFlag = false; finishMatch(G.winner === G.player.team); } }
   if (!G.over) G.endFlag = false;
 }
 
