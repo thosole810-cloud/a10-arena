@@ -24,14 +24,12 @@ export const NET = {
   status: 'Chưa kết nối',
   inputs: [], snap: null, snapT: 0, overMsg: null,  // dùng bởi main.js
   myName: '', myHero: 'binhan', cbs: [],
-  diag: [], _joinFail: null,
 };
 export function onNet(cb) { NET.cbs.push(cb); }
 const emit = (type, data = {}) => { for (const cb of NET.cbs) { try { cb({ type, ...data }); } catch (e) { console.error(e); } } };
-const trace = (s) => { NET.diag.push(Date.now() % 100000 + ' ' + s); if (NET.diag.length > 60) NET.diag.shift(); };
 function setStatus(s) { NET.status = s; emit('status'); }
 const roster = () => NET.players.map((p) => ({ id: p.id, name: p.name, hero: p.hero, ready: p.ready }));
-const pub = (topic, o) => { trace('pub ' + topic.split('/').slice(-2).join('/') + ':' + (o.t || '')); try { if (NET.session && NET.session.ready) NET.session.publish(topic, enc(o)); } catch (e) { trace('pub ERR ' + e.message); } };
+const pub = (topic, o) => { try { if (NET.session && NET.session.ready) NET.session.publish(topic, enc(o)); } catch (e) { /* */ } };
 const sendOut = (o) => pub(outTopic(NET.code), o);
 
 // ---------- quảng bá phòng (cho GHÉP TRẬN NHANH) ----------
@@ -57,7 +55,7 @@ function resetState(closeSession = true) {
   NET.session = null;
   NET.code = NET.gid = NET.owner = NET.id = null; NET.players = [];
   NET.isHost = NET.active = NET.started = NET.sentOver = false;
-  NET.inputs = []; NET.snap = null; NET.overMsg = null; NET._joinFail = null;
+  NET.inputs = []; NET.snap = null; NET.overMsg = null;
 }
 function onGone() {
   if (!NET.active && !NET.session) return;
@@ -73,7 +71,6 @@ function hostOnMsg(topic, payload) {
   if (!m || m[1] !== NET.code) return;
   const gid = m[2];
   const msg = parse(payload); if (!msg) return;
-  trace('host recv in:' + msg.t);
   const me = NET.players.find((p) => p.id === gid);
   switch (msg.t) {
     case 'join': {
@@ -143,10 +140,8 @@ function joinInternal(code, timeoutMs, onFail) {
   const out = outTopic(code);
   NET.session = mqttSession(
     (topic, payload) => {
-      trace('got ' + topic);
       if (topic !== out) return;
       const msg = parse(payload); if (!msg) return;
-      trace('recv out:' + msg.t);
       if (msg.to && msg.to !== NET.gid) return;
       if (msg.t === 'room' && !gotRoom) { gotRoom = true; clearTimeout(timer); setStatus('Đã kết nối ✓'); }
       if (msg.t === 'err' && !gotRoom) { clearTimeout(timer); onFail(msg.msg); return; }
